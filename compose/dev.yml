@@ -1,0 +1,142 @@
+x-developer: &application-development
+  user: "${UID:-1000}:${GID:-1000}"
+
+
+x-application-dev: &application-dev-service
+  <<: *application-development
+  stdin_open: true
+  tty: true
+  build:
+    context: .
+  restart: unless-stopped
+
+  depends_on: &application-service-dependencies
+    - db
+
+  environment: &application-environment-variables
+    DJANGO_SETTINGS_MODULE: lemmy_moderation_dashboard.services.base.settings
+    LEMMY_ADMIN_STATIC_ROOT: /var/lemmy_moderation_dashboard/static
+    LEMMY_ADMIN_MEDIA_ROOT: /var/lemmy_moderation_dashboard/media
+    LEMMY_ADMIN_BROKER_URL: redis://broker:6379/0
+    LEMMY_ADMIN_CACHE_BACKEND: django_redis.cache.RedisCache
+    LEMMY_ADMIN_CACHE_LOCATION: redis://cache:6379/0
+    LEMMY_ADMIN_CORS_HEADERS_ENABLED: 1
+    LEMMY_ADMIN_DATABASE_HOST: db
+    LEMMY_ADMIN_DATABASE_PORT: 5432
+    LEMMY_ADMIN_DATABASE_NAME: lemmy_moderation_dashboard
+    LEMMY_ADMIN_DATABASE_USER: lemmy_moderation_dashboard
+    LEMMY_ADMIN_DATABASE_PASSWORD: lemmy_moderation_dashboard
+    LEMMY_ADMIN_EMAIL_MAILER_ADDRESS: noreply@example.com
+    LEMMY_ADMIN_EMAIL_BACKEND: django.core.mail.backends.console.EmailBackend
+    LEMMY_ADMIN_SECRET_KEY: base-application-secret-key
+    LEMMY_ADMIN_DEBUG: "true"
+    LEMMY_DATABASE_HOST: lemmy-db
+    LEMMY_DATABASE_PORT: 5432
+    LEMMY_DATABASE_NAME: lemmy
+    LEMMY_DATABASE_USER: lemmy
+    LEMMY_DATABASE_PASSWORD: lemmy
+
+  env_file:
+    - .env
+
+  volumes:
+    - ./:/app
+    - "${LEMMY_ADMIN_STATIC_MOUNT_PATH:-./docker/volumes/lemmy_moderation_dashboard/media/static}:/var/lemmy_moderation_dashboard/static"
+    - "${LEMMY_ADMIN_MEDIA_MOUNT_PATH:-./docker/volumes/lemmy_moderation_dashboard/media/media}:/var/lemmy_moderation_dashboard/media"
+
+
+x-webapp: &application-webservice
+  command: poetry run uvicorn lemmy_moderation_dashboard.services.base.asgi:application --port 80 --host 0.0.0.0 --reload --reload-dir=/app/lemmy_moderation_dashboard --reload-include *.html
+
+services:
+  db:
+    <<: *application-development
+    image: "postgres:${LEMMY_ADMIN_POSTGRES_SERVER_VERSION:-latest}"
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: lemmy_moderation_dashboard
+      POSTGRES_PASSWORD: lemmy_moderation_dashboard
+      POSTGRES_DB: lemmy_moderation_dashboard
+    volumes:
+      - "${LEMMY_ADMIN_DATABASE_MOUNT_PATH:-./docker/volumes/lemmy_moderation_dashboard/database}:/var/lib/postgresql/data"
+
+
+  admin:
+    <<: [*fediverser-dev-service, *application-webservice]
+    ports:
+      - 8000:80
+
+  init_migrate_db:
+    <<: *fediverser-dev-service
+    restart: on-failure
+
+  init_collect_static:
+    <<: *fediverser-dev-service
+    restart: on-failure
+
+  lemmy:
+    <<: *application-development
+    image: dessalines/lemmy:0.18.5
+    environment:
+      - RUST_LOG="warn,lemmy_server=info,lemmy_api=info,lemmy_api_common=info,lemmy_api_crud=info,lemmy_apub=info,lemmy_db_queries=info,lemmy_db_schema=info,lemmy_db_views=info,lemmy_db_views_actor=info,lemmy_db_views_moderator=info,lemmy_routes=info,lemmy_utils=info,lemmy_websocket=info"
+    volumes:
+      - "${LEMMY_ADMIN_LEMMY_BACKEND_CONFIG_MOUNT_PATH:-./docker/volumes/lemmy}:/config/"
+    depends_on:
+      - lemmy-db
+      - lemmy-pictrs
+    ports:
+      - "8536:8536"
+
+  lemmy-ui:
+    <<: *application-development
+    image: dessalines/lemmy-ui:0.18.5
+    restart: always
+    environment:
+      - LEMMY_UI_LEMMY_INTERNAL_HOST=lemmy:8536
+    volumes:
+      - "${LEMMY_ADMIN_LEMMY_UI_MOUNT_PATH:-../docker/volumes/lemmy-ui/extra_themes}:/app/extra_themes"
+    depends_on:
+      - lemmy
+    ports:
+      - "1234:1234"
+
+  lemmy-db:
+    <<: *application-development
+    image: postgres:15
+    environment:
+      - POSTGRES_USER=lemmy
+      - POSTGRES_PASSWORD=lemmy
+      - POSTGRES_DB=lemmy
+    volumes:
+      - "${LEMMY_ADMIN_LEMMY_DATABASE_MOUNT_PATH:-./docker/volumes/lemmy-db}:/var/lib/postgresql/data"
+    restart: always
+
+  lemmy-pictrs:
+    image: asonix/pictrs:0.5.9
+    user: 991:991
+    environment:
+      PICTRS__API_KEY: pictrs_pass
+      RUST_BACKTRACE: full
+      PICTRS__MEDIA__FORMAT: webp
+      PICTRS__MEDIA__ENABLE_FULL_VIDEO: "true"
+      PICTRS__MEDIA__VIDEO_CODEC: vp9
+      PICTRS__MEDIA__GIF__MAX_WIDTH: 1920
+      PICTRS__MEDIA__GIF__MAX_HEIGHT: 1080
+      PICTRS__MEDIA__GIF__MAX_AREA: 2073600
+      PICTRS__MEDIA__GIF__MAX_FRAME_COUNT: 1800
+
+    restart: always
+
+  lemmy-proxy:
+    image: nginx:1-alpine
+    restart: on-failure
+    ports:
+      - "8888:80"
+    volumes:
+      - "${LEMMY_ADMIN_LEMMY_NGINX_CONFIG_MOUNT_PATH:-./docker/volumes/lemmy/nginx}:/etc/nginx/:ro"
+
+    depends_on:
+      - lemmy
+      - lemmy-ui
+      - lemmy-db
+      - lemmy-pictrs

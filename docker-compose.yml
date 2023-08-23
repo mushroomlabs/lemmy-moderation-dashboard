@@ -1,0 +1,21 @@
+version: '3.7'
+
+x-lemmyadmin-service: &lemmyadmin-service
+  image: "lemmy_moderation_dashboard/app:${TAG:-latest}"
+  command: poetry run uvicorn lemmy_moderation_dashboard.services.base.asgi:application --port 80 --host 0.0.0.0
+
+  environment: &lemmyadmin-service-environment
+    DJANGO_SETTINGS_MODULE: lemmy_moderation_dashboard.services.base.settings
+    LEMMY_ADMIN_ROOT_URLCONF: lemmy_moderation_dashboard.services.admin.urls
+
+services:
+  admin:
+    <<: *lemmyadmin-service
+
+  init_migrate_db:
+    <<: *lemmyadmin-service
+    command: poetry run django-admin migrate
+
+  init_collect_static:
+    <<: *lemmyadmin-service
+    command: poetry run django-admin collectstatic --no-input
